@@ -227,17 +227,22 @@ bun run report.ts <username> --output=./_site/index.html
 
 ### 手动触发
 
+**仅仓库 Owner** 可运行（`github.actor` 须与 `github.repository_owner` 一致）。协作者或其他有 Write 权限的用户触发时，`authorize` job 会失败并提示错误。
+
 仓库页 → **Actions** → **Update Starred Repos** → **Run workflow**：
 
 | 输入 | 说明 |
 |---|---|
-| `username` | 留空则使用触发者（`github.actor`） |
+| `username` | 留空则使用触发者（`github.actor`，即 Owner 本人） |
 | `mode` | `incremental` / `full` |
 | `full-interval-days` | 增量模式下，距上次全量超此天数自动转全量 |
 
 ### 执行流程
 
 ```diagram
+authorize job
+  └─ 校验触发者是否为仓库 Owner
+
 update job
   ├─ Fetch starred repos     → 写入 data/<username>/stars.db
   ├─ Build report            → 生成 _site/index.html
@@ -250,6 +255,7 @@ deploy-pages job（依赖 update）
 ```
 
 特性：
+- **仅 Owner 可手动触发**（组织仓库下 `repository_owner` 为组织名，须由组织 Owner 账号触发）
 - 使用仓库默认 `GITHUB_TOKEN`（1000 req/hr 配额，足够使用）
 - 权限：`contents: write`（提交数据）+ `pages: write` / `id-token: write`（Pages 部署）
 - 并发分组：同一用户避免并行抓取竞争

@@ -30,7 +30,19 @@ permissions:
   id-token: write
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only repository owner may run
+        run: |
+          if [ "${{ github.actor }}" != "${{ github.repository_owner }}" ]; then
+            echo "::error::仅仓库 Owner (@${{ github.repository_owner }}) 可手动触发此工作流，当前用户: @${{ github.actor }}"
+            exit 1
+          fi
+          echo "✅ Owner @${{ github.actor }} verified"
+
   update:
+    needs: authorize
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

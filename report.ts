@@ -84,6 +84,25 @@ interface ReportData {
 
 const DOW_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
+/** 报表统计与展示统一使用东八区（GitHub API 时间为 UTC） */
+const REPORT_TZ = 'Asia/Shanghai';
+const SQL_TZ_OFFSET = '+8 hours';
+
+/** SQLite：UTC 列转为东八区 datetime 表达式 */
+function sqlAtTz(column: string): string {
+  return `datetime(${column}, '${SQL_TZ_OFFSET}')`;
+}
+
+/** SQLite：东八区下的 date(列) */
+function sqlDateAtTz(column: string): string {
+  return `date(${sqlAtTz(column)})`;
+}
+
+/** SQLite：相对东八区「当前」的 datetime 锚点 */
+function sqlNowAtTz(): string {
+  return `datetime('now', '${SQL_TZ_OFFSET}')`;
+}
+
 // ============================================================
 // 数据采集与分析
 // ============================================================
@@ -104,14 +123,16 @@ function collect(username: string, dbPath: string): ReportData {
     const starsSum = db.query<{ s: number }, []>('SELECT COALESCE(SUM(stargazers_count),0) s FROM repos').get()?.s ?? 0;
 
     // ---------- KPI（带 delta） ----------
+    const starredLocal = sqlAtTz('starred_at');
+    const nowLocal = sqlNowAtTz();
     const periodCounts = db.query<{ p30: number; p60: number; p365: number; p730: number; this_year: number; last_year: number }, []>(`
       SELECT
-        SUM(CASE WHEN starred_at >= date('now','-30 days') THEN 1 ELSE 0 END) p30,
-        SUM(CASE WHEN starred_at >= date('now','-60 days') AND starred_at < date('now','-30 days') THEN 1 ELSE 0 END) p60,
-        SUM(CASE WHEN starred_at >= date('now','-365 days') THEN 1 ELSE 0 END) p365,
-        SUM(CASE WHEN starred_at >= date('now','-730 days') AND starred_at < date('now','-365 days') THEN 1 ELSE 0 END) p730,
-        SUM(CASE WHEN starred_at >= date('now','start of year') THEN 1 ELSE 0 END) this_year,
-        SUM(CASE WHEN starred_at >= date('now','start of year','-1 years') AND starred_at < date('now','start of year') THEN 1 ELSE 0 END) last_year
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, '-30 days') THEN 1 ELSE 0 END) p30,
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, '-60 days') AND ${starredLocal} < datetime(${nowLocal}, '-30 days') THEN 1 ELSE 0 END) p60,
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, '-365 days') THEN 1 ELSE 0 END) p365,
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, '-730 days') AND ${starredLocal} < datetime(${nowLocal}, '-365 days') THEN 1 ELSE 0 END) p730,
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, 'start of year') THEN 1 ELSE 0 END) this_year,
+        SUM(CASE WHEN ${starredLocal} >= datetime(${nowLocal}, 'start of year', '-1 years') AND ${starredLocal} < datetime(${nowLocal}, 'start of year') THEN 1 ELSE 0 END) last_year
       FROM repos
     `).get()!;
     const last30 = periodCounts.p30;
@@ -121,7 +142,10 @@ function collect(username: string, dbPath: string): ReportData {
     const thisYear = periodCounts.this_year;
     const lastYear = periodCounts.last_year;
 
-    const stale2y = db.query<{ c: number }, []>(`SELECT COUNT(*) c FROM repos WHERE pushed_at < date('now','-730 days')`).get()?.c ?? 0;
+    const pushedLocal = sqlAtTz('pushed_at');
+    const stale2y = db.query<{ c: number }, []>(`
+      SELECT COUNT(*) c FROM repos WHERE ${pushedLocal} < datetime(${nowLocal}, '-730 days')
+    `).get()?.c ?? 0;
     const stalePct = total > 0 ? Math.round((stale2y / total) * 100) : 0;
 
     // 顶级语言占比
@@ -136,7 +160,7 @@ function collect(username: string, dbPath: string): ReportData {
 
     // ---------- Activity（提前到 KPI 之前算，用于 sparkline） ----------
     const byDate = db.query<{ date: string; count: number }, []>(`
-      SELECT date(starred_at) date, COUNT(*) count FROM repos
+      SELECT ${sqlDateAtTz('starred_at')} date, COUNT(*) count FROM repos
       GROUP BY date ORDER BY date
     `).all();
 
@@ -144,11 +168,7 @@ function collect(username: string, dbPath: string): ReportData {
     const dailyLast30 = fillDailySeries(byDate, 30);
     const rollingAvg30 = rolling7DaySeries(byDate, 30);
     const cumulativeLast90 = cumulativeSeries(byDate, 90);
-    const totalsSinceJan = (() => {
-      const yearStart = new Date(new Date().getFullYear(), 0, 1);
-      const days = Math.max(1, Math.floor((Date.now() - yearStart.getTime()) / 86_400_000));
-      return cumulativeSeries(byDate, Math.min(days, 365));
-    })();
+    const totalsSinceJan = cumulativeSeries(byDate, daysSinceCstYearStart());
 
     const kpis: KpiBlock[] = [
       {
@@ -204,7 +224,7 @@ function collect(username: string, dbPath: string): ReportData {
 
     const velocity30 = db.query<{ d: string; v: number }, []>(`
       WITH daily AS (
-        SELECT date(starred_at) d, COUNT(*) n FROM repos GROUP BY d
+        SELECT ${sqlDateAtTz('starred_at')} d, COUNT(*) n FROM repos GROUP BY d
       )
       SELECT d, SUM(n) OVER (ORDER BY d ROWS BETWEEN 29 PRECEDING AND CURRENT ROW) v FROM daily
     `).all().map((r) => ({ date: r.d, value: r.v }));
@@ -221,14 +241,14 @@ function collect(username: string, dbPath: string): ReportData {
 
     // ---------- Discovery ----------
     const dowRaw = db.query<{ dow: number; c: number }, []>(`
-      SELECT CAST(strftime('%w', starred_at) AS INTEGER) dow, COUNT(*) c
+      SELECT CAST(strftime('%w', ${starredLocal}) AS INTEGER) dow, COUNT(*) c
       FROM repos GROUP BY dow ORDER BY dow
     `).all();
     const dowMap = new Map(dowRaw.map((r) => [r.dow, r.c]));
     const byDow = DOW_LABELS.map((label, dow) => ({ dow, label, count: dowMap.get(dow) ?? 0 }));
 
     const hourRaw = db.query<{ h: number; c: number }, []>(`
-      SELECT CAST(strftime('%H', starred_at) AS INTEGER) h, COUNT(*) c
+      SELECT CAST(strftime('%H', ${starredLocal}) AS INTEGER) h, COUNT(*) c
       FROM repos GROUP BY h ORDER BY h
     `).all();
     const hourMap = new Map(hourRaw.map((r) => [r.h, r.c]));
@@ -241,7 +261,7 @@ function collect(username: string, dbPath: string): ReportData {
     const peakHour = byHour.reduce((a, b) => (b.count > a.count ? b : a));
     const period =
       peakHour.hour < 6 ? '凌晨' : peakHour.hour < 12 ? '上午' : peakHour.hour < 18 ? '下午' : '晚间';
-    const discoveryInsight = `你最常在 ${topDow.label} 发现新仓库（占 ${topDowPct}%），活跃时段集中在 ${period}（${peakHour.hour}:00 前后）。`;
+    const discoveryInsight = `你最常在 ${topDow.label} 发现新仓库（占 ${topDowPct}%），活跃时段集中在 ${period}（东八区 ${peakHour.hour}:00 前后）。`;
 
     // ---------- Composition ----------
     const byLanguageRaw = db.query<{ language: string; count: number; stars: number }, []>(`
@@ -314,10 +334,10 @@ function collect(username: string, dbPath: string): ReportData {
     const freshnessRaw = db.query<{ b: string; c: number }, []>(`
       SELECT
         CASE
-          WHEN pushed_at >= date('now','-90 days')   THEN 'active'
-          WHEN pushed_at >= date('now','-365 days')  THEN 'recent'
-          WHEN pushed_at >= date('now','-730 days')  THEN 'stale1'
-          WHEN pushed_at >= date('now','-1825 days') THEN 'stale3'
+          WHEN ${pushedLocal} >= datetime(${nowLocal}, '-90 days')   THEN 'active'
+          WHEN ${pushedLocal} >= datetime(${nowLocal}, '-365 days')  THEN 'recent'
+          WHEN ${pushedLocal} >= datetime(${nowLocal}, '-730 days')  THEN 'stale1'
+          WHEN ${pushedLocal} >= datetime(${nowLocal}, '-1825 days') THEN 'stale3'
           ELSE 'abandoned'
         END b,
         COUNT(*) c
@@ -346,7 +366,7 @@ function collect(username: string, dbPath: string): ReportData {
           : `仓库活跃度健康，绝大多数仍在维护中。`;
 
     const repoAge = db.query<{ year: number; count: number }, []>(`
-      SELECT CAST(strftime('%Y', json_extract(raw_json,'$.created_at')) AS INTEGER) year, COUNT(*) count
+      SELECT CAST(strftime('%Y', datetime(json_extract(raw_json,'$.created_at'), '${SQL_TZ_OFFSET}')) AS INTEGER) year, COUNT(*) count
       FROM repos
       WHERE json_extract(raw_json,'$.created_at') IS NOT NULL
       GROUP BY year ORDER BY year
@@ -426,16 +446,33 @@ function fmtNum(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-/** 把按日聚合的稀疏序列展开为最近 N 天的密集序列（缺失日 = 0） */
+/** 东八区日历日 YYYY-MM-DD（与 SQL date(datetime(..., '+8 hours')) 对齐） */
+function cstDateKey(ms: number = Date.now()): string {
+  return new Date(ms).toLocaleDateString('en-CA', { timeZone: REPORT_TZ });
+}
+
+/** 东八区 date key → 该日 12:00 的 UTC 毫秒（中国无夏令时，固定 +8） */
+function cstDateKeyToNoonUtcMs(key: string): number {
+  const [y, m, d] = key.split('-').map(Number);
+  return Date.UTC(y!, m! - 1, d!, 4, 0, 0);
+}
+
+/** 东八区当年 1 月 1 日至今的天数（含今天） */
+function daysSinceCstYearStart(): number {
+  const todayKey = cstDateKey();
+  const year = todayKey.slice(0, 4);
+  const startKey = `${year}-01-01`;
+  const days = Math.round((cstDateKeyToNoonUtcMs(todayKey) - cstDateKeyToNoonUtcMs(startKey)) / 86_400_000) + 1;
+  return Math.max(1, Math.min(days, 366));
+}
+
+/** 把按日聚合的稀疏序列展开为最近 N 天的密集序列（缺失日 = 0，东八区） */
 function fillDailySeries(byDate: { date: string; count: number }[], days: number): number[] {
   const map = new Map(byDate.map((d) => [d.date, d.count]));
   const result: number[] = [];
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
+  const todayNoon = cstDateKeyToNoonUtcMs(cstDateKey());
   for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setUTCDate(today.getUTCDate() - i);
-    const key = d.toISOString().slice(0, 10);
+    const key = cstDateKey(todayNoon - i * 86_400_000);
     result.push(map.get(key) ?? 0);
   }
   return result;
@@ -510,7 +547,7 @@ function buildNarrative(n: NarrativeInput): string {
 
   // 4. 探索画像
   const period = n.peakHour < 6 ? '凌晨' : n.peakHour < 12 ? '上午' : n.peakHour < 18 ? '下午' : '晚间';
-  parts.push(`${n.topDow.label}${period}是发现高峰`);
+  parts.push(`${n.topDow.label}${period}（东八区）是发现高峰`);
 
   // 5. 健康信号（可操作建议）
   if (n.abandonedPct >= 25) {
@@ -849,7 +886,7 @@ function render(data: ReportData): string {
     <div class="card card-allow-overflow" style="margin-bottom: 16px;">
       <div class="card-head">
         <div class="card-title">每日 Star 热力图</div>
-        <div class="card-sub">近 3 年按天聚合，越暖代表当天 star 越多</div>
+        <div class="card-sub">近 3 年按天聚合（东八区 UTC+8），越暖代表当天 star 越多</div>
       </div>
       <div class="card-body card-body-chart">
         <div id="chart-heatmap" class="chart chart-heatmap" style="height:auto"></div>
@@ -876,7 +913,7 @@ function render(data: ReportData): string {
     <div class="section-head">
       <span class="section-eyebrow">Discovery</span>
       <div class="section-title">探索行为画像</div>
-      <p class="section-desc">星标动作背后是你的学习时间分配；时间分布揭示你是工作日学习者、周末党，还是夜猫子。</p>
+      <p class="section-desc">星标动作背后是你的学习时间分配；以下按东八区（UTC+8）统计，避免 UTC 偏移把白天操作算进凌晨。</p>
     </div>
     <div class="grid-2">
       <div class="card">
@@ -889,7 +926,7 @@ function render(data: ReportData): string {
       <div class="card">
         <div class="card-head">
           <div class="card-title">按时段分布</div>
-          <div class="card-sub">24 小时探索热力，反映精力曲线</div>
+          <div class="card-sub">24 小时探索热力（东八区），反映精力曲线</div>
         </div>
         <div class="card-body"><div id="chart-hour" class="chart"></div></div>
       </div>
@@ -1004,8 +1041,9 @@ const DATA = ${json};
 // ---------- 工具 ----------
 const fmt = n => Number(n).toLocaleString('en-US');
 const fmtCompact = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
-const fmtDate = iso => iso ? new Date(iso).toLocaleString('zh-CN', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '—';
-const fmtDateOnly = iso => iso ? new Date(iso).toLocaleDateString('zh-CN') : '—';
+const TZ = 'Asia/Shanghai';
+const fmtDate = iso => iso ? new Date(iso).toLocaleString('zh-CN', { timeZone: TZ, month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12: false }) : '—';
+const fmtDateOnly = iso => iso ? new Date(iso).toLocaleDateString('zh-CN', { timeZone: TZ }) : '—';
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 const langColor = lang => ({
   JavaScript:'#f1e05a', TypeScript:'#3178c6', Python:'#3572A5', Go:'#00ADD8',
@@ -1091,6 +1129,16 @@ const baseOption = {
   },
   grid: { left: 40, right: 20, top: 20, bottom: 30, containLabel: true }
 };
+/** 底部横向图例，避免与右上角 Y 轴名称重叠 */
+const legendBottom = {
+  orient: 'horizontal',
+  left: 'center',
+  bottom: 6,
+  itemGap: 28,
+  itemWidth: 14,
+  itemHeight: 10,
+  textStyle: { color: MUTED, fontSize: 11 },
+};
 function axis(opts) {
   return {
     axisLine: { lineStyle: { color: GRID } },
@@ -1160,16 +1208,22 @@ function axis(opts) {
   const chart = echarts.init(document.getElementById('chart-growth'));
   chart.setOption({
     ...baseOption,
-    grid: { left: 50, right: 60, top: 30, bottom: 30, containLabel: true },
-    legend: { right: 10, top: 4, textStyle: { color: MUTED, fontSize: 11 }, itemWidth: 16, itemHeight: 10 },
+    grid: { left: 52, right: 52, top: 28, bottom: 52, containLabel: true },
+    legend: { ...legendBottom },
     tooltip: {
       ...baseOption.tooltip,
       trigger: 'axis', axisPointer: { type: 'cross', lineStyle: { color: '#52525b' } }
     },
     xAxis: axis({ type: 'time' }),
     yAxis: [
-      axis({ type: 'value', name: '累积', nameTextStyle: { color: DIM, fontSize: 11 } }),
-      axis({ type: 'value', name: '30天速率', nameTextStyle: { color: DIM, fontSize: 11 }, position: 'right', splitLine: { show: false } })
+      axis({ type: 'value', name: '累积', nameGap: 12, nameTextStyle: { color: DIM, fontSize: 11 } }),
+      axis({
+        type: 'value',
+        position: 'right',
+        nameGap: 12,
+        splitLine: { show: false },
+        axisLabel: { color: DIM, fontSize: 11 },
+      }),
     ],
     series: [
       {
@@ -1298,9 +1352,16 @@ function axis(opts) {
   chart.setOption({
     ...baseOption,
     tooltip: { ...baseOption.tooltip, formatter: p => \`<b>\${p.name}</b><br/>\${p.value} 仓库 · \${p.percent}%\` },
-    legend: { bottom: 0, textStyle: { color: MUTED, fontSize: 11 }, itemWidth: 10, itemHeight: 10 },
+    legend: {
+      ...legendBottom,
+      bottom: 4,
+      type: 'scroll',
+      width: '92%',
+      pageIconColor: MUTED,
+      pageTextStyle: { color: DIM, fontSize: 10 },
+    },
     series: [{
-      type: 'pie', radius: ['45%', '75%'], center: ['50%', '45%'],
+      type: 'pie', radius: ['42%', '68%'], center: ['50%', '42%'],
       data: DATA.health.popularity.map(p => ({
         name: p.label, value: p.count,
         itemStyle: { color: colors[p.tier] }

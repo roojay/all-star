@@ -176,9 +176,10 @@ FROM changes ORDER BY id DESC LIMIT 50;
 
 ## 可视化报表
 
-生成一份本地 HTML 仪表盘（深色主题 + ECharts，单文件可分享）：
+生成一份本地 HTML 仪表盘（深色主题 + ECharts，单文件可分享）。**所有日期、时段、KPI 周期均按东八区（`Asia/Shanghai`，UTC+8）统计**，与 GitHub API 返回的 UTC 时间自动换算，避免「晚间操作显示成凌晨」的偏移。
 
 ```bash
+
 # 在同步之后跑（需要 stars.db 已存在）
 bun run report.ts <username>
 

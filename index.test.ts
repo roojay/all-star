@@ -11,7 +11,7 @@ async function test() {
   const fetcher = new GitHubStarredFetcher(username);
 
   try {
-    await fetcher.fetchAllStarredRepos();
+    await fetcher.run();
     console.log('✅ 测试完成！');
   } catch (error) {
     console.error('❌ 测试失败:', error);

@@ -1,0 +1,137 @@
+name: Update Starred Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'GitHub 用户名（默认使用触发者）'
+        required: false
+        default: ''
+      mode:
+        description: '抓取模式'
+        required: true
+        type: choice
+        default: incremental
+        options:
+          - incremental
+          - full
+      full-interval-days:
+        description: '增量模式下，距上次全量超过该天数自动转全量'
+        required: false
+        default: '7'
+
+concurrency:
+  group: update-stars-${{ inputs.username || github.actor }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要完整历史以便 push
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve username
+        id: resolve
+        run: |
+          USERNAME="${{ inputs.username }}"
+          if [ -z "$USERNAME" ]; then
+            USERNAME="${{ github.actor }}"
+          fi
+          echo "username=$USERNAME" >> "$GITHUB_OUTPUT"
+          echo "🎯 目标用户: $USERNAME"
+
+      - name: Fetch starred repos
+        env:
+          # 默认 GITHUB_TOKEN（仓库作用域）已提供 1000 req/hr 的认证配额，足够使用
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun run index.ts \
+            "${{ steps.resolve.outputs.username }}" \
+            --${{ inputs.mode }} \
+            --full-interval=${{ inputs.full-interval-days }}
+
+      - name: Build report
+        run: |
+          mkdir -p _site
+          bun run report.ts "${{ steps.resolve.outputs.username }}" --output=_site/index.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Detect changes
+        id: diff
+        run: |
+          git add -A data
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️  无数据变化，跳过提交"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat
+          fi
+
+      - name: Commit & push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "chore(data): update ${{ steps.resolve.outputs.username }} stars (${{ inputs.mode }})
+
+          Triggered by: ${{ github.actor }}
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          git push
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## ⭐ Update Result"
+            echo ""
+            echo "- **User**: ${{ steps.resolve.outputs.username }}"
+            echo "- **Mode**: ${{ inputs.mode }}"
+            echo "- **Changed**: ${{ steps.diff.outputs.changed || 'n/a' }}"
+            echo "- **Report**: \`_site/index.html\`（已上传 Pages artifact，等待 deploy-pages job）"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-pages:
+    needs: update
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Summary
+        run: |
+          {
+            echo "## 📊 Report Published"
+            echo ""
+            echo "- **URL**: ${{ steps.deployment.outputs.page_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -4,6 +4,11 @@
 
 针对 GitHub REST API 设计的高效抓取器：默认增量模式，仅请求"自上次同步以来新增的 star"，配合 SQLite 单文件存储与 GitHub Actions 自动化，同步数据并发布可视化报表到 GitHub Pages。
 
+本仓库当前账号为 **[roojay](https://github.com/roojay)**（原 `roojay520`），项目地址为 [roojay/all-star](https://github.com/roojay/all-star)，数据目录统一为 `data/roojay/`：
+
+- 最新 Star 数据和变更历史保存在 [`stars.db`](data/roojay/stars.db)，本地报表为 [`report.html`](data/roojay/report.html)。
+- 同目录的 `starred-page-*.json` 和 [`summary.json`](data/roojay/summary.json) 是 **2025-06-16 的历史快照**（4,865 个仓库、49 页），仅统一账号标签和目录路径，保留原始抓取时间及仓库内容，不参与当前同步与报表统计。
+
 ## 功能特性
 
 - ⚡ **增量同步**：基于 `starred_at` 早停 + `If-Modified-Since` 304 协商，正常增量场景仅需 1 个请求
